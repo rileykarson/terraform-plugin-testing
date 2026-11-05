@@ -125,7 +125,8 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 				}
 			}
 
-			return wd.CreatePlan(ctx, opts...)
+			_, err := wd.CreatePlan(ctx, opts...)
+			return err
 		})
 		if err != nil {
 			return fmt.Errorf("Error running pre-apply plan: %w", err)
@@ -188,7 +189,8 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 				var opts []tfexec.PlanOption
 				opts = append(opts, tfexec.Destroy(true))
 
-				return wd.CreatePlan(ctx, opts...)
+				_, err := wd.CreatePlan(ctx, opts...)
+				return err
 			})
 			if err != nil {
 				return fmt.Errorf("Error running destroy plan after step.Check shimmed state was retrieved: %w", err)
@@ -266,6 +268,7 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 	logging.HelperResourceDebug(ctx, "Running Terraform CLI plan to check for perpetual differences")
 
 	// do a plan
+	var hasChanges bool
 	err = runProviderCommand(ctx, t, wd, providers, func() error {
 		opts := []tfexec.PlanOption{
 			tfexec.Refresh(false),
@@ -283,7 +286,9 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 			}
 		}
 
-		return wd.CreatePlan(ctx, opts...)
+		var err error
+		hasChanges, err = wd.CreatePlan(ctx, opts...)
+		return err
 	})
 	if err != nil {
 		if step.PlanOnly {
@@ -293,33 +298,38 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 		return fmt.Errorf("Error running post-apply non-refresh plan: %w", err)
 	}
 
-	var plan *tfjson.Plan
-	err = runProviderCommand(ctx, t, wd, providers, func() error {
-		var err error
-		plan, err = wd.SavedPlan(ctx)
-		return err
-	})
-	if err != nil {
-		if step.PlanOnly {
-			return fmt.Errorf("Error reading saved non-refresh plan: %w", err)
-		}
-
-		return fmt.Errorf("Error reading saved post-apply non-refresh plan: %w", err)
-	}
-
-	// Run post-apply, pre-refresh plan checks
-	if len(step.ConfigPlanChecks.PostApplyPreRefresh) > 0 {
-		err = runPlanChecks(ctx, t, plan, step.ConfigPlanChecks.PostApplyPreRefresh)
+	planEmpty := !hasChanges
+	if hasChanges || len(step.ConfigPlanChecks.PostApplyPreRefresh) > 0 {
+		var plan *tfjson.Plan
+		err = runProviderCommand(ctx, t, wd, providers, func() error {
+			var err error
+			plan, err = wd.SavedPlan(ctx)
+			return err
+		})
 		if err != nil {
 			if step.PlanOnly {
-				return fmt.Errorf("Non-refresh plan checks(s) failed:\n%w", err)
+				return fmt.Errorf("Error reading saved non-refresh plan: %w", err)
 			}
 
-			return fmt.Errorf("Post-apply, pre-refresh plan check(s) failed:\n%w", err)
+			return fmt.Errorf("Error reading saved post-apply non-refresh plan: %w", err)
 		}
+
+		// Run post-apply, pre-refresh plan checks
+		if len(step.ConfigPlanChecks.PostApplyPreRefresh) > 0 {
+			err = runPlanChecks(ctx, t, plan, step.ConfigPlanChecks.PostApplyPreRefresh)
+			if err != nil {
+				if step.PlanOnly {
+					return fmt.Errorf("Non-refresh plan checks(s) failed:\n%w", err)
+				}
+
+				return fmt.Errorf("Post-apply, pre-refresh plan check(s) failed:\n%w", err)
+			}
+		}
+
+		planEmpty = planIsEmpty(plan, helper.TerraformVersion())
 	}
 
-	if !planIsEmpty(plan, helper.TerraformVersion()) && !step.ExpectNonEmptyPlan {
+	if !planEmpty && !step.ExpectNonEmptyPlan {
 		var stdout string
 		err = runProviderCommand(ctx, t, wd, providers, func() error {
 			var err error
@@ -357,7 +367,9 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 			}
 		}
 
-		return wd.CreatePlan(ctx, opts...)
+		var err error
+		hasChanges, err = wd.CreatePlan(ctx, opts...)
+		return err
 	})
 	if err != nil {
 		if step.PlanOnly {
@@ -367,29 +379,35 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 		return fmt.Errorf("Error running post-apply refresh plan: %w", err)
 	}
 
-	err = runProviderCommand(ctx, t, wd, providers, func() error {
-		var err error
-		plan, err = wd.SavedPlan(ctx)
-		return err
-	})
-	if err != nil {
-		if step.PlanOnly {
-			return fmt.Errorf("Error reading refresh plan: %w", err)
-		}
-
-		return fmt.Errorf("Error reading post-apply refresh plan: %w", err)
-	}
-
-	// Run post-apply, post-refresh plan checks
-	if len(step.ConfigPlanChecks.PostApplyPostRefresh) > 0 {
-		err = runPlanChecks(ctx, t, plan, step.ConfigPlanChecks.PostApplyPostRefresh)
+	planEmpty = !hasChanges
+	if hasChanges || len(step.ConfigPlanChecks.PostApplyPostRefresh) > 0 {
+		var plan *tfjson.Plan
+		err = runProviderCommand(ctx, t, wd, providers, func() error {
+			var err error
+			plan, err = wd.SavedPlan(ctx)
+			return err
+		})
 		if err != nil {
-			return fmt.Errorf("Post-apply refresh plan check(s) failed:\n%w", err)
+			if step.PlanOnly {
+				return fmt.Errorf("Error reading refresh plan: %w", err)
+			}
+
+			return fmt.Errorf("Error reading post-apply refresh plan: %w", err)
 		}
+
+		// Run post-apply, post-refresh plan checks
+		if len(step.ConfigPlanChecks.PostApplyPostRefresh) > 0 {
+			err = runPlanChecks(ctx, t, plan, step.ConfigPlanChecks.PostApplyPostRefresh)
+			if err != nil {
+				return fmt.Errorf("Post-apply refresh plan check(s) failed:\n%w", err)
+			}
+		}
+
+		planEmpty = planIsEmpty(plan, helper.TerraformVersion())
 	}
 
 	// check if plan is empty
-	if !planIsEmpty(plan, helper.TerraformVersion()) && !step.ExpectNonEmptyPlan {
+	if !planEmpty && !step.ExpectNonEmptyPlan {
 		var stdout string
 		err = runProviderCommand(ctx, t, wd, providers, func() error {
 			var err error
@@ -405,7 +423,7 @@ func testStepNewConfig(ctx context.Context, t testing.T, c TestCase, wd *plugint
 		}
 
 		return fmt.Errorf("After applying this test step, the refresh plan was not empty.\nstdout\n\n%s", stdout)
-	} else if step.ExpectNonEmptyPlan && planIsEmpty(plan, helper.TerraformVersion()) {
+	} else if step.ExpectNonEmptyPlan && planEmpty {
 		return errors.New("Expected a non-empty plan, but got an empty refresh plan")
 	}
 

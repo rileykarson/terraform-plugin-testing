@@ -63,32 +63,40 @@ func testStepNewRefreshState(ctx context.Context, t testing.T, wd *plugintest.Wo
 	}
 
 	// do a plan
+	var hasChanges bool
 	err = runProviderCommand(ctx, t, wd, providers, func() error {
-		return wd.CreatePlan(ctx)
+		var err error
+		hasChanges, err = wd.CreatePlan(ctx)
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("Error running post-refresh plan: %w", err)
 	}
 
-	var plan *tfjson.Plan
-	err = runProviderCommand(ctx, t, wd, providers, func() error {
-		var err error
-		plan, err = wd.SavedPlan(ctx)
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("Error retrieving post-refresh plan: %w", err)
-	}
-
-	// Run post-refresh plan checks
-	if len(step.RefreshPlanChecks.PostRefresh) > 0 {
-		err = runPlanChecks(ctx, t, plan, step.RefreshPlanChecks.PostRefresh)
+	planEmpty := !hasChanges
+	if hasChanges || len(step.RefreshPlanChecks.PostRefresh) > 0 {
+		var plan *tfjson.Plan
+		err = runProviderCommand(ctx, t, wd, providers, func() error {
+			var err error
+			plan, err = wd.SavedPlan(ctx)
+			return err
+		})
 		if err != nil {
-			return fmt.Errorf("Post-refresh plan check(s) failed:\n%w", err)
+			return fmt.Errorf("Error retrieving post-refresh plan: %w", err)
 		}
+
+		// Run post-refresh plan checks
+		if len(step.RefreshPlanChecks.PostRefresh) > 0 {
+			err = runPlanChecks(ctx, t, plan, step.RefreshPlanChecks.PostRefresh)
+			if err != nil {
+				return fmt.Errorf("Post-refresh plan check(s) failed:\n%w", err)
+			}
+		}
+
+		planEmpty = planIsEmpty(plan, wd.GetHelper().TerraformVersion())
 	}
 
-	if !planIsEmpty(plan, wd.GetHelper().TerraformVersion()) && !step.ExpectNonEmptyPlan {
+	if !planEmpty && !step.ExpectNonEmptyPlan {
 		var stdout string
 		err = runProviderCommand(ctx, t, wd, providers, func() error {
 			var err error

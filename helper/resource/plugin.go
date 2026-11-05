@@ -127,7 +127,8 @@ func runProviderCommandCreatePlan(ctx context.Context, t testing.T, wd *pluginte
 	t.Helper()
 
 	fn := func() error {
-		return wd.CreatePlan(ctx)
+		_, err := wd.CreatePlan(ctx)
+		return err
 	}
 	return runProviderCommand(ctx, t, wd, factories, fn)
 }
@@ -136,7 +137,8 @@ func runProviderCommandGenerateConfigAndCreatePlan(ctx context.Context, t testin
 	t.Helper()
 
 	fn := func() error {
-		return wd.CreatePlan(ctx, opts...)
+		_, err := wd.CreatePlan(ctx, opts...)
+		return err
 	}
 	return runProviderCommand(ctx, t, wd, factories, fn)
 }

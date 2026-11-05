@@ -4,8 +4,10 @@
 package resource
 
 import (
+	"context"
 	"errors"
 	"regexp"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
@@ -961,4 +963,113 @@ func Test_Destroy_Checks_Avoid_Stale_Plan(t *testing.T) {
 			},
 		},
 	})
+}
+
+type getProviderSchemaCountingServer struct {
+	tfprotov6.ProviderServer
+	count *atomic.Int32
+}
+
+func (s getProviderSchemaCountingServer) GetProviderSchema(ctx context.Context, req *tfprotov6.GetProviderSchemaRequest) (*tfprotov6.GetProviderSchemaResponse, error) {
+	s.count.Add(1)
+	return s.ProviderServer.GetProviderSchema(ctx, req)
+}
+
+func newGetProviderSchemaCountingFactory(p testprovider.Provider) (func() (tfprotov6.ProviderServer, error), *atomic.Int32) {
+	var count atomic.Int32
+	baseFactory := providerserver.NewProviderServer(p)
+
+	return func() (tfprotov6.ProviderServer, error) {
+		srv, err := baseFactory()
+		if err != nil {
+			return nil, err
+		}
+
+		return getProviderSchemaCountingServer{
+			ProviderServer: srv,
+			count:          &count,
+		}, nil
+	}, &count
+}
+
+func simpleTestProvider() testprovider.Provider {
+	return testprovider.Provider{
+		Resources: map[string]testprovider.Resource{
+			"test_resource": {
+				CreateResponse: &resource.CreateResponse{
+					NewState: tftypes.NewValue(
+						tftypes.Object{
+							AttributeTypes: map[string]tftypes.Type{
+								"id": tftypes.String,
+							},
+						},
+						map[string]tftypes.Value{
+							"id": tftypes.NewValue(tftypes.String, "test"),
+						},
+					),
+				},
+				SchemaResponse: &resource.SchemaResponse{
+					Schema: &tfprotov6.Schema{
+						Block: &tfprotov6.SchemaBlock{
+							Attributes: []*tfprotov6.SchemaAttribute{
+								{
+									Name:     "id",
+									Type:     tftypes.String,
+									Computed: true,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func Test_Config_SkipsSavedPlanWhenEmptyWithoutPlanChecks(t *testing.T) {
+	t.Parallel()
+
+	withoutChecksFactory, withoutChecksCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withoutChecksFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+		},
+	})
+
+	withChecksFactory, withChecksCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withChecksFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+				ConfigPlanChecks: ConfigPlanChecks{
+					PostApplyPreRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectEmptyPlan(),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectEmptyPlan(),
+					},
+				},
+			},
+		},
+	})
+
+	// Both post-apply SavedPlan (terraform show -json) calls should be skipped when
+	// the plans have no changes and no post-apply plan checks are configured.
+	if diff := withChecksCount.Load() - withoutChecksCount.Load(); diff != 2 {
+		t.Fatalf("expected 2 fewer GetProviderSchema calls without post-apply plan checks (got without=%d, with=%d)", withoutChecksCount.Load(), withChecksCount.Load())
+	}
 }

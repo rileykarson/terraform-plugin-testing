@@ -206,3 +206,54 @@ func Test_RefreshState_NonEmptyPlan_Error(t *testing.T) {
 		},
 	})
 }
+
+func Test_RefreshState_SkipsSavedPlanWhenEmptyWithoutPlanChecks(t *testing.T) {
+	t.Parallel()
+
+	withoutChecksFactory, withoutChecksCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withoutChecksFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+			{
+				RefreshState: true,
+			},
+		},
+	})
+
+	withChecksFactory, withChecksCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withChecksFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+			{
+				RefreshState: true,
+				RefreshPlanChecks: RefreshPlanChecks{
+					PostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectEmptyPlan(),
+					},
+				},
+			},
+		},
+	})
+
+	// Post-refresh SavedPlan (terraform show -json) should be skipped when the
+	// post-refresh plan has no changes and RefreshPlanChecks.PostRefresh is empty.
+	if diff := withChecksCount.Load() - withoutChecksCount.Load(); diff != 1 {
+		t.Fatalf("expected 1 fewer GetProviderSchema call without post-refresh plan checks (got without=%d, with=%d)", withoutChecksCount.Load(), withChecksCount.Load())
+	}
+}

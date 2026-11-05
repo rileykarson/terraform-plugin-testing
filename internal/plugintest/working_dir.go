@@ -335,8 +335,9 @@ func (wd *WorkingDir) planFilename() string {
 }
 
 // CreatePlan runs "terraform plan" to create a saved plan file, which if successful
-// will then be used for the next call to Apply.
-func (wd *WorkingDir) CreatePlan(ctx context.Context, opts ...tfexec.PlanOption) error {
+// will then be used for the next call to Apply. The returned boolean is true when the
+// plan diff is non-empty (changes present).
+func (wd *WorkingDir) CreatePlan(ctx context.Context, opts ...tfexec.PlanOption) (bool, error) {
 	logging.HelperResourceTrace(ctx, "Calling Terraform CLI plan command")
 
 	opts = append(opts, tfexec.Reattach(wd.reattachInfo))
@@ -347,24 +348,24 @@ func (wd *WorkingDir) CreatePlan(ctx context.Context, opts ...tfexec.PlanOption)
 	logging.HelperResourceTrace(ctx, "Called Terraform CLI plan command")
 
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if !hasChanges {
 		logging.HelperResourceTrace(ctx, "Created plan with no changes")
 
-		return nil
+		return false, nil
 	}
 
 	stdout, err := wd.SavedPlanRawStdout(ctx)
 
 	if err != nil {
-		return fmt.Errorf("error retrieving formatted plan output: %w", err)
+		return false, fmt.Errorf("error retrieving formatted plan output: %w", err)
 	}
 
 	logging.HelperResourceTrace(ctx, "Created plan with changes", map[string]any{logging.KeyTestTerraformPlan: stdout})
 
-	return nil
+	return true, nil
 }
 
 // Apply runs "terraform apply". If CreatePlan has previously completed
