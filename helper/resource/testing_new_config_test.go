@@ -6,13 +6,17 @@ package resource
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
+	"github.com/hashicorp/terraform-plugin-testing/internal/logging"
 	"github.com/hashicorp/terraform-plugin-testing/internal/testing/testprovider"
 	"github.com/hashicorp/terraform-plugin-testing/internal/testing/testsdk/providerserver"
 	"github.com/hashicorp/terraform-plugin-testing/internal/testing/testsdk/resource"
@@ -1071,5 +1075,61 @@ func Test_Config_SkipsSavedPlanWhenEmptyWithoutPlanChecks(t *testing.T) {
 	// the plans have no changes and no post-apply plan checks are configured.
 	if diff := withChecksCount.Load() - withoutChecksCount.Load(); diff != 2 {
 		t.Fatalf("expected 2 fewer GetProviderSchema calls without post-apply plan checks (got without=%d, with=%d)", withoutChecksCount.Load(), withChecksCount.Load())
+	}
+}
+
+func Test_CreatePlan_SkipsSavedPlanRawStdoutWithoutTraceLogging(t *testing.T) {
+	t.Setenv(logging.EnvTfLog, "")
+	t.Setenv(logging.EnvTfAccLogPath, "")
+	t.Setenv(logging.EnvTfLogSdk, "")
+	t.Setenv(logging.EnvTfLogSdkHelperResource, "")
+
+	withoutTraceFactory, withoutTraceCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withoutTraceFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+		},
+	})
+
+	logFile := filepath.Join(t.TempDir(), "trace.log")
+	t.Setenv("TF_LOG_PATH", logFile)
+	t.Setenv(logging.EnvTfLogSdkHelperResource, "TRACE")
+
+	withTraceFactory, withTraceCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withTraceFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+		},
+	})
+
+	// SavedPlanRawStdout (terraform show) inside WorkingDir.CreatePlan should only
+	// run when helper_resource TRACE logging is enabled.
+	if diff := withTraceCount.Load() - withoutTraceCount.Load(); diff != 1 {
+		t.Fatalf("expected 1 fewer GetProviderSchema call without trace logging (got without=%d, with=%d)", withoutTraceCount.Load(), withTraceCount.Load())
+	}
+
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("error reading trace log file: %s", err)
+	}
+
+	if !strings.Contains(string(logBytes), "Created plan with changes") {
+		t.Fatalf("expected trace log to contain 'Created plan with changes', got:\n%s", string(logBytes))
 	}
 }
