@@ -5,14 +5,6 @@ package logging
 
 // Environment variables.
 const (
-	// EnvTfAccLogPath is an environment variable that sets the combined log
-	// output file path and defaults test logging to TRACE.
-	EnvTfAccLogPath = "TF_ACC_LOG_PATH"
-
-	// EnvTfLog is an environment variable that sets the base logging level
-	// while the provider is under test.
-	EnvTfLog = "TF_LOG"
-
 	// EnvTfLogSdk is an environment variable that sets the logging level of
 	// the root SDK logger, while the provider is under test. In "production"
 	// usage, this environment variable is handled by terraform-plugin-go.
