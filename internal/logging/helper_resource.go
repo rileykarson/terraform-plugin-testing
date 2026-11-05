@@ -14,6 +14,12 @@ const (
 	SubsystemHelperResource = "helper_resource"
 )
 
+// IsHelperResourceTrace returns true if the helper/resource subsystem logger
+// would emit a TRACE-level log.
+func IsHelperResourceTrace(ctx context.Context) bool {
+	return tfsdklog.SubsystemIsTrace(ctx, SubsystemHelperResource)
+}
+
 // HelperResourceTrace emits a helper/resource subsystem log at TRACE level.
 func HelperResourceTrace(ctx context.Context, msg string, additionalFields ...map[string]interface{}) {
 	tfsdklog.SubsystemTrace(ctx, SubsystemHelperResource, msg, additionalFields...)

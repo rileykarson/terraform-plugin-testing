@@ -356,13 +356,15 @@ func (wd *WorkingDir) CreatePlan(ctx context.Context, opts ...tfexec.PlanOption)
 		return nil
 	}
 
-	stdout, err := wd.SavedPlanRawStdout(ctx)
+	if logging.IsHelperResourceTrace(ctx) {
+		stdout, err := wd.SavedPlanRawStdout(ctx)
 
-	if err != nil {
-		return fmt.Errorf("error retrieving formatted plan output: %w", err)
+		if err != nil {
+			return fmt.Errorf("error retrieving formatted plan output: %w", err)
+		}
+
+		logging.HelperResourceTrace(ctx, "Created plan with changes", map[string]any{logging.KeyTestTerraformPlan: stdout})
 	}
-
-	logging.HelperResourceTrace(ctx, "Created plan with changes", map[string]any{logging.KeyTestTerraformPlan: stdout})
 
 	return nil
 }

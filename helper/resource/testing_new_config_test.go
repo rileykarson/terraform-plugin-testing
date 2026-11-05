@@ -4,13 +4,19 @@
 package resource
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
+	"github.com/hashicorp/terraform-plugin-testing/internal/logging"
 	"github.com/hashicorp/terraform-plugin-testing/internal/testing/testprovider"
 	"github.com/hashicorp/terraform-plugin-testing/internal/testing/testsdk/providerserver"
 	"github.com/hashicorp/terraform-plugin-testing/internal/testing/testsdk/resource"
@@ -961,4 +967,126 @@ func Test_Destroy_Checks_Avoid_Stale_Plan(t *testing.T) {
 			},
 		},
 	})
+}
+
+type getProviderSchemaCountingServer struct {
+	tfprotov6.ProviderServer
+	count *atomic.Int32
+}
+
+func (s getProviderSchemaCountingServer) GetProviderSchema(ctx context.Context, req *tfprotov6.GetProviderSchemaRequest) (*tfprotov6.GetProviderSchemaResponse, error) {
+	s.count.Add(1)
+	return s.ProviderServer.GetProviderSchema(ctx, req)
+}
+
+func newGetProviderSchemaCountingFactory(p testprovider.Provider) (func() (tfprotov6.ProviderServer, error), *atomic.Int32) {
+	var count atomic.Int32
+	baseFactory := providerserver.NewProviderServer(p)
+
+	return func() (tfprotov6.ProviderServer, error) {
+		srv, err := baseFactory()
+		if err != nil {
+			return nil, err
+		}
+
+		return getProviderSchemaCountingServer{
+			ProviderServer: srv,
+			count:          &count,
+		}, nil
+	}, &count
+}
+
+func simpleTestProvider() testprovider.Provider {
+	return testprovider.Provider{
+		Resources: map[string]testprovider.Resource{
+			"test_resource": {
+				CreateResponse: &resource.CreateResponse{
+					NewState: tftypes.NewValue(
+						tftypes.Object{
+							AttributeTypes: map[string]tftypes.Type{
+								"id": tftypes.String,
+							},
+						},
+						map[string]tftypes.Value{
+							"id": tftypes.NewValue(tftypes.String, "test"),
+						},
+					),
+				},
+				SchemaResponse: &resource.SchemaResponse{
+					Schema: &tfprotov6.Schema{
+						Block: &tfprotov6.SchemaBlock{
+							Attributes: []*tfprotov6.SchemaAttribute{
+								{
+									Name:     "id",
+									Type:     tftypes.String,
+									Computed: true,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func Test_CreatePlan_SkipsSavedPlanRawStdoutWithoutTraceLogging(t *testing.T) {
+	t.Cleanup(func() {
+		_ = logging.InitTestContext(context.Background(), t)
+	})
+
+	t.Setenv("TF_LOG", "")
+	t.Setenv("TF_ACC_LOG_PATH", "")
+	t.Setenv("TF_LOG_PROVIDER", "")
+	t.Setenv(logging.EnvTfLogSdk, "")
+	t.Setenv(logging.EnvTfLogSdkHelperResource, "")
+
+	withoutTraceFactory, withoutTraceCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withoutTraceFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+		},
+	})
+
+	logFile := filepath.Join(t.TempDir(), "trace.log")
+	t.Setenv("TF_LOG_PATH", logFile)
+	t.Setenv(logging.EnvTfLogSdkHelperResource, "TRACE")
+
+	withTraceFactory, withTraceCount := newGetProviderSchemaCountingFactory(simpleTestProvider())
+	UnitTest(t, TestCase{
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_0_0), // ProtoV6ProviderFactories
+		},
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
+			"test": withTraceFactory,
+		},
+		Steps: []TestStep{
+			{
+				Config: `resource "test_resource" "test" {}`,
+			},
+		},
+	})
+
+	// SavedPlanRawStdout (terraform show) inside WorkingDir.CreatePlan should only
+	// run when helper_resource TRACE logging is enabled.
+	if diff := withTraceCount.Load() - withoutTraceCount.Load(); diff != 1 {
+		t.Fatalf("expected 1 fewer GetProviderSchema call without trace logging (got without=%d, with=%d)", withoutTraceCount.Load(), withTraceCount.Load())
+	}
+
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("error reading trace log file: %s", err)
+	}
+
+	if !strings.Contains(string(logBytes), "Created plan with changes") {
+		t.Fatalf("expected trace log to contain 'Created plan with changes', got:\n%s", string(logBytes))
+	}
 }
